@@ -3,7 +3,7 @@ import WebSocket from "ws";
 import { v4 as uuidv4 } from "uuid";
 
 const METRO_JSON_PATH = "/json";
-const REQUEST_TIMEOUT_MS = 10_000;
+const REQUEST_TIMEOUT_MS = 8_000; // must be < IPC DEFAULT_TIMEOUT_MS (10s)
 const RECONNECT_DELAY_MS = 1_000;
 const TARGET_WAIT_MS = 10_000;
 const TARGET_POLL_INTERVAL_MS = 500;
@@ -166,6 +166,7 @@ export class CDPBridge {
       ws.on("open", () => {
         this.connected = true;
         this.send("Runtime.enable", {});
+        this.send("Debugger.enable", {});
         this.send("Network.enable", {});
         this.send("Console.enable", {});
         resolve();

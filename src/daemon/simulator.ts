@@ -27,54 +27,79 @@ export class SimulatorBridge {
 
   async tap(x: number, y: number, udid?: string): Promise<string> {
     if (this.platform === "ios") {
-      await this.simctlSendTap(x, y, udid ?? "booted");
+      await this.cgEventTap(x, y);
     } else {
       await execa("adb", ["-s", udid ?? await this.adbDevice(), "shell", "input", "tap", String(x), String(y)]);
     }
     return `Tapped (${x}, ${y}).`;
   }
 
-  private async simctlSendTap(x: number, y: number, target: string): Promise<void> {
-    // idb is the only reliable way to send touch events to iOS simulator.
-    // Install with: brew install idb-companion
-    const udid = target === "booted" ? await this.bootedUdid() : target;
+  private async cgEventTap(x: number, y: number): Promise<void> {
+    // Bring Simulator to front and get window origin
+    await execa("osascript", ["-e", 'tell application "Simulator" to activate']);
+    const posResult = await execa("osascript", ["-e",
+      'tell application "System Events" to tell process "Simulator" to get position of front window',
+    ]);
+    const [winX, winY] = posResult.stdout.trim().split(", ").map(Number);
+
+    // ~100px of window chrome (title bar + device top bezel at default scale)
+    const screenX = Math.round(winX + x);
+    const screenY = Math.round(winY + 100 + y);
+
+    const swiftCode = [
+      "import CoreGraphics",
+      `let pt = CGPoint(x: ${screenX}, y: ${screenY})`,
+      "CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: pt, mouseButton: .left)!.post(tap: .cghidEventTap)",
+      "CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: pt, mouseButton: .left)!.post(tap: .cghidEventTap)",
+    ].join("\n");
+    const swiftFile = path.join(os.tmpdir(), `rn-probe-tap-${Date.now()}.swift`);
+    fs.writeFileSync(swiftFile, swiftCode);
     try {
-      await execa("idb", ["ui", "tap", String(x), String(y), "--udid", udid]);
-      return;
-    } catch (err: unknown) {
-      const msg = (err as { code?: string; message?: string }).code === "ENOENT"
-        ? "idb not found. Install with: brew install idb-companion"
-        : `idb tap failed: ${(err as Error).message}`;
-      throw new Error(msg);
+      await execa("swift", [swiftFile]);
+    } finally {
+      fs.unlinkSync(swiftFile);
     }
   }
 
-  private async bootedUdid(): Promise<string> {
-    const result = await execa("xcrun", ["simctl", "list", "devices", "--json"]);
-    const data = JSON.parse(result.stdout) as {
-      devices: Record<string, Array<{ udid: string; state: string }>>;
-    };
-    const booted = Object.values(data.devices)
-      .flat()
-      .find((d) => d.state === "Booted");
-    if (!booted) throw new Error("No booted iOS simulator found.");
-    return booted.udid;
+  private async cgEventSwipe(x1: number, y1: number, x2: number, y2: number): Promise<void> {
+    await execa("osascript", ["-e", 'tell application "Simulator" to activate']);
+    const posResult = await execa("osascript", ["-e",
+      'tell application "System Events" to tell process "Simulator" to get position of front window',
+    ]);
+    const [winX, winY] = posResult.stdout.trim().split(", ").map(Number);
+    const ox = winX, oy = winY + 100;
+
+    const sx1 = Math.round(ox + x1), sy1 = Math.round(oy + y1);
+    const sx2 = Math.round(ox + x2), sy2 = Math.round(oy + y2);
+
+    const swiftCode = [
+      "import CoreGraphics",
+      "import Foundation",
+      `let start = CGPoint(x: ${sx1}, y: ${sy1})`,
+      `let end = CGPoint(x: ${sx2}, y: ${sy2})`,
+      "CGEvent(mouseEventSource: nil, mouseType: .leftMouseDown, mouseCursorPosition: start, mouseButton: .left)!.post(tap: .cghidEventTap)",
+      "for i in 1...10 {",
+      "  let t = Double(i) / 10.0",
+      "  let pt = CGPoint(x: start.x + (end.x - start.x) * t, y: start.y + (end.y - start.y) * t)",
+      "  CGEvent(mouseEventSource: nil, mouseType: .leftMouseDragged, mouseCursorPosition: pt, mouseButton: .left)!.post(tap: .cghidEventTap)",
+      "  Thread.sleep(forTimeInterval: 0.03)",
+      "}",
+      "CGEvent(mouseEventSource: nil, mouseType: .leftMouseUp, mouseCursorPosition: end, mouseButton: .left)!.post(tap: .cghidEventTap)",
+    ].join("\n");
+    const swiftFile = path.join(os.tmpdir(), `rn-probe-swipe-${Date.now()}.swift`);
+    fs.writeFileSync(swiftFile, swiftCode);
+    try {
+      await execa("swift", [swiftFile]);
+    } finally {
+      fs.unlinkSync(swiftFile);
+    }
   }
 
   // ── Swipe ────────────────────────────────────────────────────────────────────
 
   async swipe(x1: number, y1: number, x2: number, y2: number, udid?: string): Promise<string> {
     if (this.platform === "ios") {
-      const target = udid ?? "booted";
-      const resolvedUdid = target === "booted" ? await this.bootedUdid() : target;
-      try {
-        await execa("idb", ["ui", "swipe", String(x1), String(y1), String(x2), String(y2), "--udid", resolvedUdid]);
-      } catch (err: unknown) {
-        const msg = (err as { code?: string }).code === "ENOENT"
-          ? "idb not found. Install with: brew install idb-companion"
-          : `idb swipe failed: ${(err as Error).message}`;
-        throw new Error(msg);
-      }
+      await this.cgEventSwipe(x1, y1, x2, y2);
     } else {
       await execa("adb", [
         "-s", udid ?? await this.adbDevice(),
@@ -140,8 +165,8 @@ export class SimulatorBridge {
 
   async back(udid?: string): Promise<string> {
     if (this.platform === "ios") {
-      // iOS has no hardware back; send a swipe-from-left gesture as approximation
-      await execa("xcrun", ["simctl", "io", udid ?? "booted", "sendEvent", "--swipe", "10,400:100,400"]);
+      // iOS has no hardware back; approximate with a swipe-from-left-edge gesture
+      await this.cgEventSwipe(10, 400, 100, 400);
     } else {
       await execa("adb", ["-s", udid ?? await this.adbDevice(), "shell", "input", "keyevent", "BACK"]);
     }
@@ -165,9 +190,25 @@ export class SimulatorBridge {
 
   async type(text: string, udid?: string): Promise<string> {
     if (this.platform === "ios") {
-      // xcrun simctl doesn't have a direct "type text" command;
-      // use keyboard events character by character via AppleScript as best effort
-      await execa("xcrun", ["simctl", "io", udid ?? "booted", "sendEvent", "--text", text]);
+      // Copy text to clipboard then paste via Cmd+V CGEvent
+      await execa("bash", ["-c", `printf '%s' ${JSON.stringify(text)} | pbcopy`]);
+      const swiftCode = [
+        "import CoreGraphics",
+        "let cmd: CGEventFlags = .maskCommand",
+        "let down = CGEvent(keyboardEventSource: nil, virtualKey: 0x09, keyDown: true)!",
+        "let up = CGEvent(keyboardEventSource: nil, virtualKey: 0x09, keyDown: false)!",
+        "down.flags = cmd",
+        "up.flags = cmd",
+        "down.post(tap: .cghidEventTap)",
+        "up.post(tap: .cghidEventTap)",
+      ].join("\n");
+      const swiftFile = path.join(os.tmpdir(), `rn-probe-type-${Date.now()}.swift`);
+      fs.writeFileSync(swiftFile, swiftCode);
+      try {
+        await execa("swift", [swiftFile]);
+      } finally {
+        fs.unlinkSync(swiftFile);
+      }
     } else {
       const encoded = text.replace(/ /g, "%s");
       await execa("adb", ["-s", udid ?? await this.adbDevice(), "shell", "input", "text", encoded]);
