@@ -1,3 +1,8 @@
+---
+name: rn-probe
+description: Pair-program on a live React Native app — inspect component trees, errors, logs, screenshots, and drive the simulator from Claude Code.
+---
+
 # rn-probe
 
 A CLI + daemon tool that gives Claude Code structured, text-based introspection into a live React Native app — the same way `next-browser` does for Next.js in a browser.
