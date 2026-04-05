@@ -347,40 +347,45 @@ export class CDPBridge {
   // ── 2.2 getTree — walks React fiber tree via Runtime.evaluate ────────────
 
   async getTree(): Promise<string> {
-    // Wrap in a Promise so Hermes schedules this as a microtask rather than
-    // blocking on the current busy tick (e.g. GPS + Ably updates running).
-    const script = `new Promise(function(resolve) {
-      setTimeout(function() {
-        try {
-          var hook = globalThis.__REACT_DEVTOOLS_GLOBAL_HOOK__;
-          if (!hook || !hook.renderers || hook.renderers.size === 0) {
-            return resolve('(React DevTools hook not found — is the app running in dev mode?)');
-          }
-          var lines = [];
-          var nodeId = 0;
-          hook.renderers.forEach(function(renderer, rendererId) {
-            var roots = hook.getFiberRoots
-              ? hook.getFiberRoots(rendererId)
-              : (renderer.getFiberRoots ? renderer.getFiberRoots() : new Set());
-            roots.forEach(function(root) {
-              function walk(fiber, depth) {
-                if (!fiber || depth > 30 || nodeId > 500) return;
-                var name = null;
-                if (typeof fiber.type === 'function' || typeof fiber.type === 'object') {
-                  name = (fiber.type && (fiber.type.displayName || fiber.type.name)) || null;
-                }
-                if (name) lines.push('  '.repeat(depth) + '[' + (nodeId++) + '] ' + name);
-                if (fiber.child) walk(fiber.child, depth + (name ? 1 : 0));
-                if (fiber.sibling) walk(fiber.sibling, depth);
+    const script = `(function() {
+      try {
+        var hook = globalThis.__REACT_DEVTOOLS_GLOBAL_HOOK__;
+        if (!hook || !hook.renderers || hook.renderers.size === 0) {
+          return '(React DevTools hook not found — is the app running in dev mode?)';
+        }
+        var lines = [];
+        var nodeId = 0;
+        hook.renderers.forEach(function(renderer, rendererId) {
+          var roots = hook.getFiberRoots
+            ? hook.getFiberRoots(rendererId)
+            : (renderer.getFiberRoots ? renderer.getFiberRoots() : new Set());
+          roots.forEach(function(root) {
+            function walk(fiber, depth) {
+              if (!fiber || depth > 30 || nodeId > 500) return;
+              var name = null;
+              if (typeof fiber.type === 'function' || typeof fiber.type === 'object') {
+                name = (fiber.type && (fiber.type.displayName || fiber.type.name)) || null;
               }
-              walk(root.current, 0);
-            });
+              if (name) lines.push('  '.repeat(depth) + '[' + (nodeId++) + '] ' + name);
+              if (fiber.child) walk(fiber.child, depth + (name ? 1 : 0));
+              if (fiber.sibling) walk(fiber.sibling, depth);
+            }
+            walk(root.current, 0);
           });
-          resolve(lines.length > 0 ? lines.join('\\n') : '(empty tree)');
-        } catch(e) { resolve('Error walking fiber tree: ' + String(e)); }
-      }, 0);
-    })`;
-    return this.evaluateWithTimeout(script, TREE_TIMEOUT_MS, true);
+        });
+        return lines.length > 0 ? lines.join('\n') : '(empty tree)';
+      } catch(e) { return 'Error walking fiber tree: ' + String(e); }
+    })()`;
+
+    // Pause the JS thread so Runtime.evaluate is guaranteed to run even when
+    // the app event loop is saturated (GPS updates, Ably, etc.).
+    await this.request('Debugger.enable', {});
+    await this.request('Debugger.pause', {});
+    try {
+      return await this.evaluateWithTimeout(script, TREE_TIMEOUT_MS);
+    } finally {
+      await this.request('Debugger.resume', {}).catch(() => {});
+    }
   }
 
   // ── 2.3 inspect ───────────────────────────────────────────────────────────
