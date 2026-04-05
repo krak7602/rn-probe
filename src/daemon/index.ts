@@ -77,6 +77,7 @@ register("close", async () => {
 // ── Metro handlers ────────────────────────────────────────────────────────────
 
 register("bundle-status", async () => metro.getBundleStatus());
+register("debug-targets", async () => cdp ? cdp.dumpTargets() : "No CDP connection active.");
 register("errors", async () => metro.getErrors(devtools.getErrors()));
 register("logs", async (p) => {
   const lines = Number(p.lines ?? 50);

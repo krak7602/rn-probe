@@ -317,91 +317,101 @@ export class CDPBridge {
     return JSON.stringify(result.result.value ?? result.result.description, null, 2);
   }
 
-  // ── 2.2 getTree ───────────────────────────────────────────────────────────
+  // ── 2.2 getTree — walks React fiber tree via Runtime.evaluate ────────────
 
   async getTree(): Promise<string> {
-    let nodes: ComponentNode[];
-    try {
-      const result = await this.request<{ nodes: ComponentNode[] }>(
-        "ReactDevTools.getComponentTree",
-        { rendererID: 1 }
-      );
-      nodes = result.nodes;
-    } catch (err) {
-      const msg = (err as Error).message;
-      if (msg.includes("-32601") || msg.includes("not found") || msg.includes("not supported")) {
-        throw new Error(
-          "Component tree not available. Open React Native DevTools (press j in Metro) to enable inspection."
-        );
-      }
-      throw err;
-    }
-
-    const nodeMap = new Map<number, ComponentNode>();
-    for (const n of nodes) nodeMap.set(n.id, n);
-
-    const allChildIds = new Set(nodes.flatMap((n) => n.children));
-    const roots = nodes.filter((n) => !allChildIds.has(n.id));
-
-    const lines: string[] = [];
-    const walk = (id: number, depth: number) => {
-      const node = nodeMap.get(id);
-      if (!node) return;
-      lines.push(`${"  ".repeat(depth)}[${id}] ${node.displayName ?? "(anonymous)"}`);
-      for (const childId of node.children) walk(childId, depth + 1);
-    };
-    for (const root of roots) walk(root.id, 0);
-
-    return lines.join("\n") || "(empty tree)";
+    const script = `(function() {
+      try {
+        var hook = globalThis.__REACT_DEVTOOLS_GLOBAL_HOOK__;
+        if (!hook || !hook.renderers || hook.renderers.size === 0) {
+          return '(React DevTools hook not found — is the app running in dev mode?)';
+        }
+        var lines = [];
+        var nodeId = 0;
+        hook.renderers.forEach(function(renderer) {
+          var roots = renderer.getFiberRoots ? renderer.getFiberRoots() : new Set();
+          roots.forEach(function(root) {
+            function walk(fiber, depth) {
+              if (!fiber) return;
+              var name = null;
+              if (typeof fiber.type === 'string') name = fiber.type;
+              else if (fiber.type) name = fiber.type.displayName || fiber.type.name || null;
+              if (name) lines.push('  '.repeat(depth) + '[' + (nodeId++) + '] ' + name);
+              if (fiber.child) walk(fiber.child, depth + (name ? 1 : 0));
+              if (fiber.sibling) walk(fiber.sibling, depth);
+            }
+            walk(root.current, 0);
+          });
+        });
+        return lines.length > 0 ? lines.join('\n') : '(empty tree)';
+      } catch(e) { return 'Error walking fiber tree: ' + String(e); }
+    })()`;
+    return this.evaluate(script);
   }
 
   // ── 2.3 inspect ───────────────────────────────────────────────────────────
 
   async inspect(id: string): Promise<string | null> {
-    let el: ComponentNode | null = null;
+    const script = `(function() {
+      try {
+        var hook = globalThis.__REACT_DEVTOOLS_GLOBAL_HOOK__;
+        if (!hook || !hook.renderers || hook.renderers.size === 0) return null;
+        var target = null;
+        var nodeId = 0;
+        var targetIdx = ${Number(id)};
+        hook.renderers.forEach(function(renderer) {
+          var roots = renderer.getFiberRoots ? renderer.getFiberRoots() : new Set();
+          roots.forEach(function(root) {
+            function walk(fiber) {
+              if (!fiber || target) return;
+              var name = null;
+              if (typeof fiber.type === 'string') name = fiber.type;
+              else if (fiber.type) name = fiber.type.displayName || fiber.type.name || null;
+              if (name) { if (nodeId === targetIdx) target = fiber; nodeId++; }
+              if (fiber.child) walk(fiber.child);
+              if (fiber.sibling) walk(fiber.sibling);
+            }
+            walk(root.current);
+          });
+        });
+        if (!target) return null;
+        var result = { name: null, props: {}, state: null };
+        if (typeof target.type === 'string') result.name = target.type;
+        else if (target.type) result.name = target.type.displayName || target.type.name || null;
+        try { result.props = JSON.parse(JSON.stringify(target.memoizedProps || {})); } catch(e) {}
+        try { result.state = JSON.parse(JSON.stringify(target.memoizedState)); } catch(e) {}
+        return JSON.stringify(result);
+      } catch(e) { return null; }
+    })()`;
+    const raw = await this.evaluate(script);
+    if (!raw || raw === 'null' || raw === '"null"') return null;
     try {
-      const result = await this.request<{ value: ComponentNode } | null>(
-        "ReactDevTools.inspectElement",
-        { id: Number(id), rendererID: 1, path: null }
-      );
-      el = result?.value ?? null;
-    } catch {
-      return null;
-    }
-
-    if (!el) return null;
-
-    const lines: string[] = [];
-    lines.push(`Component:  ${el.displayName ?? "(anonymous)"}`);
-    if (el.source) lines.push(`Source:     ${el.source.fileName}:${el.source.lineNumber}`);
-    if (el.props && Object.keys(el.props).length > 0) {
-      lines.push("Props:");
-      for (const [k, v] of Object.entries(el.props)) lines.push(`  ${k}: ${JSON.stringify(v)}`);
-    }
-    if (el.state !== null && el.state !== undefined) {
-      lines.push(`State:      ${JSON.stringify(el.state, null, 2)}`);
-    }
-    if (el.hooks && el.hooks.length > 0) {
-      lines.push("Hooks:");
-      for (const h of el.hooks) lines.push(`  ${h.name}: ${JSON.stringify(h.value)}`);
-    }
-
-    return lines.join("\n");
+      const text = raw.startsWith('"') ? JSON.parse(raw) : raw;
+      const el = JSON.parse(text) as { name: string | null; props: Record<string, unknown>; state: unknown };
+      if (!el) return null;
+      const lines: string[] = [];
+      lines.push(`Component:  ${el.name ?? '(anonymous)'}`);
+      if (el.props && Object.keys(el.props).length > 0) {
+        lines.push('Props:');
+        for (const [k, v] of Object.entries(el.props)) {
+          if (k !== 'children') lines.push(`  ${k}: ${JSON.stringify(v)}`);
+        }
+      }
+      if (el.state !== null && el.state !== undefined) {
+        lines.push(`State:      ${JSON.stringify(el.state, null, 2)}`);
+      }
+      return lines.join('\n');
+    } catch { return raw; }
   }
 
   // ── 2.4 find ──────────────────────────────────────────────────────────────
 
   async find(name: string): Promise<string> {
-    const result = await this.request<{ nodes: ComponentNode[] }>(
-      "ReactDevTools.getComponentTree",
-      { rendererID: 1 }
-    );
+    const tree = await this.getTree();
     const lower = name.toLowerCase();
-    const matches = result.nodes.filter((n) =>
-      (n.displayName ?? "").toLowerCase().includes(lower)
-    );
+    const matches = tree.split('\n').filter((l) => l.toLowerCase().includes(lower));
     if (matches.length === 0) return `No components matching "${name}" found.`;
-    return matches.map((n) => `[${n.id}] ${n.displayName ?? "(anonymous)"}`).join("\n");
+    return matches.join('\n');
   }
 
   // ── 2.5 getErrors ─────────────────────────────────────────────────────────
@@ -425,7 +435,17 @@ export class CDPBridge {
 
   getLogs(lines: number): string {
     const tail = this.consoleLog.slice(-lines);
-    return tail.length > 0 ? tail.join("\n") : "(no console output captured yet)";
+    return tail.length > 0 ? tail.join("\n") : "(no console output captured yet — trigger some console.log calls in your app first, or use 'rn logs native' for native logs)";
+  }
+
+  // ── dumpTargets (debug) ───────────────────────────────────────────────────────
+
+  async dumpTargets(): Promise<string> {
+    const targets = await this.fetchTargets().catch(() => null);
+    if (!targets) return "Could not reach Metro /json";
+    return targets.map((t, i) =>
+      `[${i}] type=${t.type} title="${t.title}" ws=${t.webSocketDebuggerUrl}`
+    ).join("\n") || "(no targets)";
   }
 
   // ── 2.6 getNetwork ────────────────────────────────────────────────────────

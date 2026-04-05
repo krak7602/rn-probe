@@ -174,6 +174,13 @@ program
   .description("Type text into the currently focused input")
   .action((text: string) => dispatch("type", { text }));
 
+// ── Debug ─────────────────────────────────────────────────────────────────────
+
+program
+  .command("debug-targets")
+  .description("List CDP targets from Metro /json (debug)")
+  .action(() => dispatch("debug-targets"));
+
 // ── Computer use escalation ───────────────────────────────────────────────────
 
 program

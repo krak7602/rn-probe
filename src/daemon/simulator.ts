@@ -27,18 +27,52 @@ export class SimulatorBridge {
 
   async tap(x: number, y: number, udid?: string): Promise<string> {
     if (this.platform === "ios") {
-      await execa("xcrun", ["simctl", "io", udid ?? "booted", "sendEvent", "--tap", `${x},${y}`]);
+      await this.simctlSendTap(x, y, udid ?? "booted");
     } else {
       await execa("adb", ["-s", udid ?? await this.adbDevice(), "shell", "input", "tap", String(x), String(y)]);
     }
     return `Tapped (${x}, ${y}).`;
   }
 
+  private async simctlSendTap(x: number, y: number, target: string): Promise<void> {
+    // xcrun simctl io sendEvent takes a JSON event file — no --tap flag exists
+    const eventFile = path.join(os.tmpdir(), `rn-probe-tap-${Date.now()}.json`);
+    const event = JSON.stringify({
+      events: [
+        { type: "touch", phase: "began", x, y, time: 0 },
+        { type: "touch", phase: "ended", x, y, time: 0.1 },
+      ],
+    });
+    fs.writeFileSync(eventFile, event);
+    try {
+      await execa("xcrun", ["simctl", "io", target, "sendEvent", eventFile]);
+    } finally {
+      fs.unlinkSync(eventFile);
+    }
+  }
+
   // ── Swipe ────────────────────────────────────────────────────────────────────
 
   async swipe(x1: number, y1: number, x2: number, y2: number, udid?: string): Promise<string> {
     if (this.platform === "ios") {
-      await execa("xcrun", ["simctl", "io", udid ?? "booted", "sendEvent", "--swipe", `${x1},${y1}:${x2},${y2}`]);
+      const target = udid ?? "booted";
+      const steps = 10;
+      const dt = 0.3 / steps;
+      const events = [{ type: "touch", phase: "began", x: x1, y: y1, time: 0 }];
+      for (let i = 1; i <= steps; i++) {
+        events.push({ type: "touch", phase: "moved",
+          x: Math.round(x1 + (x2 - x1) * i / steps),
+          y: Math.round(y1 + (y2 - y1) * i / steps),
+          time: dt * i });
+      }
+      events.push({ type: "touch", phase: "ended", x: x2, y: y2, time: 0.3 });
+      const eventFile = path.join(os.tmpdir(), `rn-probe-swipe-${Date.now()}.json`);
+      fs.writeFileSync(eventFile, JSON.stringify({ events }));
+      try {
+        await execa("xcrun", ["simctl", "io", target, "sendEvent", eventFile]);
+      } finally {
+        fs.unlinkSync(eventFile);
+      }
     } else {
       await execa("adb", [
         "-s", udid ?? await this.adbDevice(),
