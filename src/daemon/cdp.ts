@@ -14,9 +14,15 @@ const LOG_BUFFER_SIZE = 500;
 
 interface CDPTarget {
   id: string;
-  title: string;
-  type: string;
+  title?: string;
+  type?: string;
   webSocketDebuggerUrl: string;
+  reactNative?: {
+    capabilities?: {
+      nativePageReloads?: boolean;
+      prefersFuseboxFrontend?: boolean;
+    };
+  };
 }
 
 interface CDPRequest {
@@ -106,7 +112,8 @@ export class CDPBridge {
       if (targets === null) return null; // Metro unreachable
 
       const target =
-        targets.find((t) => t.type === "react-native") ??
+        targets.find((t) => t.reactNative !== undefined) ??  // RN new arch Fusebox format
+        targets.find((t) => t.type === "react-native") ??    // legacy format
         targets[0] ??
         null;
 
@@ -328,11 +335,13 @@ export class CDPBridge {
         }
         var lines = [];
         var nodeId = 0;
-        hook.renderers.forEach(function(renderer) {
-          var roots = renderer.getFiberRoots ? renderer.getFiberRoots() : new Set();
+        hook.renderers.forEach(function(renderer, rendererId) {
+          var roots = hook.getFiberRoots
+            ? hook.getFiberRoots(rendererId)
+            : (renderer.getFiberRoots ? renderer.getFiberRoots() : new Set());
           roots.forEach(function(root) {
             function walk(fiber, depth) {
-              if (!fiber) return;
+              if (!fiber || depth > 50) return;
               var name = null;
               if (typeof fiber.type === 'string') name = fiber.type;
               else if (fiber.type) name = fiber.type.displayName || fiber.type.name || null;
@@ -444,7 +453,7 @@ export class CDPBridge {
     const targets = await this.fetchTargets().catch(() => null);
     if (!targets) return "Could not reach Metro /json";
     return targets.map((t, i) =>
-      `[${i}] type=${t.type} title="${t.title}" ws=${t.webSocketDebuggerUrl}`
+      `[${i}] id=${t.id} type=${t.type ?? "n/a"} rn=${t.reactNative ? JSON.stringify(t.reactNative.capabilities) : "n/a"} ws=${t.webSocketDebuggerUrl}`
     ).join("\n") || "(no targets)";
   }
 

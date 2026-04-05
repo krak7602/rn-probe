@@ -82,11 +82,33 @@ export class MetroBridge {
   // ── Reload ──────────────────────────────────────────────────────────────────
 
   async reload(): Promise<string> {
-    // Metro accepts a POST to /reload or a WebSocket message; try HTTP first.
-    await this.post("/reload", "").catch(() => {
-      // silent — Metro may not return 200 but still process it
-    });
+    // New arch Expo dev build: use Metro message WebSocket
+    const sent = await this.sendDevCommand("reload");
+    if (!sent) {
+      // Legacy fallback: POST /reload
+      await this.post("/reload", "").catch(() => {});
+    }
     return "Reload triggered.";
+  }
+
+  private sendDevCommand(name: string): Promise<boolean> {
+    return new Promise((resolve) => {
+      const wsUrl = this.baseUrl.replace(/^http/, "ws") + "/message";
+      let ws: import("ws").WebSocket;
+      try {
+        // Dynamic import to avoid top-level ws dependency in metro.ts
+        import("ws").then(({ default: WebSocket }) => {
+          ws = new WebSocket(wsUrl);
+          ws.on("open", () => {
+            ws.send(JSON.stringify({ method: "sendDevCommand", params: { name } }));
+            setTimeout(() => { ws.close(); resolve(true); }, 200);
+          });
+          ws.on("error", () => resolve(false));
+        }).catch(() => resolve(false));
+      } catch {
+        resolve(false);
+      }
+    });
   }
 
   // ── Restart Metro ───────────────────────────────────────────────────────────

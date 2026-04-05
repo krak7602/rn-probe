@@ -35,15 +35,22 @@ export class SimulatorBridge {
   }
 
   private async simctlSendTap(x: number, y: number, target: string): Promise<void> {
-    // xcrun simctl io sendEvent takes a JSON event file — no --tap flag exists
+    // Try xcrun simctl io inputmedia (Xcode 14.3+)
+    try {
+      await execa("xcrun", ["simctl", "io", target, "inputmedia", "--type", "touch",
+        "--x", String(x), "--y", String(y)]);
+      return;
+    } catch {
+      // Fall through to sendEvent JSON file approach
+    }
+    // Fallback: sendEvent with JSON event file
     const eventFile = path.join(os.tmpdir(), `rn-probe-tap-${Date.now()}.json`);
-    const event = JSON.stringify({
+    fs.writeFileSync(eventFile, JSON.stringify({
       events: [
         { type: "touch", phase: "began", x, y, time: 0 },
         { type: "touch", phase: "ended", x, y, time: 0.1 },
       ],
-    });
-    fs.writeFileSync(eventFile, event);
+    }));
     try {
       await execa("xcrun", ["simctl", "io", target, "sendEvent", eventFile]);
     } finally {
