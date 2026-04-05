@@ -322,10 +322,11 @@ export class CDPBridge {
     return this.evaluateWithTimeout(script, REQUEST_TIMEOUT_MS);
   }
 
-  private async evaluateWithTimeout(script: string, timeout: number): Promise<string> {
+  private async evaluateWithTimeout(script: string, timeout: number, awaitPromise = false): Promise<string> {
     const params: Record<string, unknown> = {
       expression: script,
       returnByValue: true,
+      awaitPromise,
     };
     if (this.executionContextId !== null) params.contextId = this.executionContextId;
 
@@ -346,37 +347,40 @@ export class CDPBridge {
   // ── 2.2 getTree — walks React fiber tree via Runtime.evaluate ────────────
 
   async getTree(): Promise<string> {
-    const script = `(function() {
-      try {
-        var hook = globalThis.__REACT_DEVTOOLS_GLOBAL_HOOK__;
-        if (!hook || !hook.renderers || hook.renderers.size === 0) {
-          return '(React DevTools hook not found — is the app running in dev mode?)';
-        }
-        var lines = [];
-        var nodeId = 0;
-        hook.renderers.forEach(function(renderer, rendererId) {
-          var roots = hook.getFiberRoots
-            ? hook.getFiberRoots(rendererId)
-            : (renderer.getFiberRoots ? renderer.getFiberRoots() : new Set());
-          roots.forEach(function(root) {
-            function walk(fiber, depth) {
-              if (!fiber || depth > 30 || nodeId > 500) return;
-              var name = null;
-              if (typeof fiber.type === 'function' || typeof fiber.type === 'object') {
-                // Only show named React components, skip host nodes (View, Text, etc.)
-                name = (fiber.type && (fiber.type.displayName || fiber.type.name)) || null;
+    // Wrap in a Promise so Hermes schedules this as a microtask rather than
+    // blocking on the current busy tick (e.g. GPS + Ably updates running).
+    const script = `new Promise(function(resolve) {
+      setTimeout(function() {
+        try {
+          var hook = globalThis.__REACT_DEVTOOLS_GLOBAL_HOOK__;
+          if (!hook || !hook.renderers || hook.renderers.size === 0) {
+            return resolve('(React DevTools hook not found — is the app running in dev mode?)');
+          }
+          var lines = [];
+          var nodeId = 0;
+          hook.renderers.forEach(function(renderer, rendererId) {
+            var roots = hook.getFiberRoots
+              ? hook.getFiberRoots(rendererId)
+              : (renderer.getFiberRoots ? renderer.getFiberRoots() : new Set());
+            roots.forEach(function(root) {
+              function walk(fiber, depth) {
+                if (!fiber || depth > 30 || nodeId > 500) return;
+                var name = null;
+                if (typeof fiber.type === 'function' || typeof fiber.type === 'object') {
+                  name = (fiber.type && (fiber.type.displayName || fiber.type.name)) || null;
+                }
+                if (name) lines.push('  '.repeat(depth) + '[' + (nodeId++) + '] ' + name);
+                if (fiber.child) walk(fiber.child, depth + (name ? 1 : 0));
+                if (fiber.sibling) walk(fiber.sibling, depth);
               }
-              if (name) lines.push('  '.repeat(depth) + '[' + (nodeId++) + '] ' + name);
-              if (fiber.child) walk(fiber.child, depth + (name ? 1 : 0));
-              if (fiber.sibling) walk(fiber.sibling, depth);
-            }
-            walk(root.current, 0);
+              walk(root.current, 0);
+            });
           });
-        });
-        return lines.length > 0 ? lines.join('\n') : '(empty tree)';
-      } catch(e) { return 'Error walking fiber tree: ' + String(e); }
-    })()`;
-    return this.evaluateWithTimeout(script, TREE_TIMEOUT_MS);
+          resolve(lines.length > 0 ? lines.join('\\n') : '(empty tree)');
+        } catch(e) { resolve('Error walking fiber tree: ' + String(e)); }
+      }, 0);
+    })`;
+    return this.evaluateWithTimeout(script, TREE_TIMEOUT_MS, true);
   }
 
   // ── 2.3 inspect ───────────────────────────────────────────────────────────
