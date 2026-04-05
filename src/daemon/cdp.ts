@@ -88,6 +88,7 @@ export class CDPBridge {
   private errorBuffer: RuntimeException[] = [];
   private networkLog: Map<string, NetworkRequest> = new Map();
   private consoleLog: string[] = [];
+  private executionContextId: number | null = null;
 
   constructor(metroUrl: string) {
     this.metroUrl = metroUrl;
@@ -248,6 +249,12 @@ export class CDPBridge {
       return;
     }
 
+    // Capture execution context ID for Runtime.evaluate calls
+    if (msg.method === "Runtime.executionContextCreated" && msg.params) {
+      const p = msg.params as { context: { id: number } };
+      this.executionContextId = p.context.id;
+    }
+
     // Console log events
     if (msg.method === "Runtime.consoleAPICalled" && msg.params) {
       const p = msg.params as {
@@ -306,14 +313,16 @@ export class CDPBridge {
   // ── 2.1 evaluate ──────────────────────────────────────────────────────────
 
   async evaluate(script: string): Promise<string> {
+    const params: Record<string, unknown> = {
+      expression: script,
+      returnByValue: true,
+    };
+    if (this.executionContextId !== null) params.contextId = this.executionContextId;
+
     const result = await this.request<{
       result: { value?: unknown; description?: string };
       exceptionDetails?: { text: string; exception?: { description?: string } };
-    }>("Runtime.evaluate", {
-      expression: script,
-      returnByValue: true,
-      awaitPromise: true,
-    });
+    }>("Runtime.evaluate", params);
 
     if (result.exceptionDetails) {
       throw new Error(

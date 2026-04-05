@@ -35,27 +35,30 @@ export class SimulatorBridge {
   }
 
   private async simctlSendTap(x: number, y: number, target: string): Promise<void> {
-    // Try xcrun simctl io inputmedia (Xcode 14.3+)
+    // idb is the only reliable way to send touch events to iOS simulator.
+    // Install with: brew install idb-companion
+    const udid = target === "booted" ? await this.bootedUdid() : target;
     try {
-      await execa("xcrun", ["simctl", "io", target, "inputmedia", "--type", "touch",
-        "--x", String(x), "--y", String(y)]);
+      await execa("idb", ["ui", "tap", String(x), String(y), "--udid", udid]);
       return;
-    } catch {
-      // Fall through to sendEvent JSON file approach
+    } catch (err: unknown) {
+      const msg = (err as { code?: string; message?: string }).code === "ENOENT"
+        ? "idb not found. Install with: brew install idb-companion"
+        : `idb tap failed: ${(err as Error).message}`;
+      throw new Error(msg);
     }
-    // Fallback: sendEvent with JSON event file
-    const eventFile = path.join(os.tmpdir(), `rn-probe-tap-${Date.now()}.json`);
-    fs.writeFileSync(eventFile, JSON.stringify({
-      events: [
-        { type: "touch", phase: "began", x, y, time: 0 },
-        { type: "touch", phase: "ended", x, y, time: 0.1 },
-      ],
-    }));
-    try {
-      await execa("xcrun", ["simctl", "io", target, "sendEvent", eventFile]);
-    } finally {
-      fs.unlinkSync(eventFile);
-    }
+  }
+
+  private async bootedUdid(): Promise<string> {
+    const result = await execa("xcrun", ["simctl", "list", "devices", "--json"]);
+    const data = JSON.parse(result.stdout) as {
+      devices: Record<string, Array<{ udid: string; state: string }>>;
+    };
+    const booted = Object.values(data.devices)
+      .flat()
+      .find((d) => d.state === "Booted");
+    if (!booted) throw new Error("No booted iOS simulator found.");
+    return booted.udid;
   }
 
   // ── Swipe ────────────────────────────────────────────────────────────────────
@@ -63,22 +66,14 @@ export class SimulatorBridge {
   async swipe(x1: number, y1: number, x2: number, y2: number, udid?: string): Promise<string> {
     if (this.platform === "ios") {
       const target = udid ?? "booted";
-      const steps = 10;
-      const dt = 0.3 / steps;
-      const events = [{ type: "touch", phase: "began", x: x1, y: y1, time: 0 }];
-      for (let i = 1; i <= steps; i++) {
-        events.push({ type: "touch", phase: "moved",
-          x: Math.round(x1 + (x2 - x1) * i / steps),
-          y: Math.round(y1 + (y2 - y1) * i / steps),
-          time: dt * i });
-      }
-      events.push({ type: "touch", phase: "ended", x: x2, y: y2, time: 0.3 });
-      const eventFile = path.join(os.tmpdir(), `rn-probe-swipe-${Date.now()}.json`);
-      fs.writeFileSync(eventFile, JSON.stringify({ events }));
+      const resolvedUdid = target === "booted" ? await this.bootedUdid() : target;
       try {
-        await execa("xcrun", ["simctl", "io", target, "sendEvent", eventFile]);
-      } finally {
-        fs.unlinkSync(eventFile);
+        await execa("idb", ["ui", "swipe", String(x1), String(y1), String(x2), String(y2), "--udid", resolvedUdid]);
+      } catch (err: unknown) {
+        const msg = (err as { code?: string }).code === "ENOENT"
+          ? "idb not found. Install with: brew install idb-companion"
+          : `idb swipe failed: ${(err as Error).message}`;
+        throw new Error(msg);
       }
     } else {
       await execa("adb", [
