@@ -4,6 +4,7 @@ import { v4 as uuidv4 } from "uuid";
 
 const METRO_JSON_PATH = "/json";
 const REQUEST_TIMEOUT_MS = 8_000; // must be < IPC DEFAULT_TIMEOUT_MS (10s)
+const TREE_TIMEOUT_MS = 25_000;   // fiber walk can be slow on large trees
 const RECONNECT_DELAY_MS = 1_000;
 const TARGET_WAIT_MS = 10_000;
 const TARGET_POLL_INTERVAL_MS = 500;
@@ -216,6 +217,10 @@ export class CDPBridge {
   }
 
   private request<T>(method: string, params?: unknown): Promise<T> {
+    return this.requestWithTimeout<T>(method, params, REQUEST_TIMEOUT_MS);
+  }
+
+  private requestWithTimeout<T>(method: string, params: unknown, timeout: number): Promise<T> {
     if (!this.connected || !this.ws) {
       throw new Error("CDP not connected.");
     }
@@ -225,7 +230,7 @@ export class CDPBridge {
       const timer = setTimeout(() => {
         this.pendingRequests.delete(id);
         reject(new Error(`CDP request '${method}' timed out`));
-      }, REQUEST_TIMEOUT_MS);
+      }, timeout);
 
       this.pendingRequests.set(id, {
         resolve: (v) => { clearTimeout(timer); resolve(v as T); },
@@ -314,16 +319,20 @@ export class CDPBridge {
   // ── 2.1 evaluate ──────────────────────────────────────────────────────────
 
   async evaluate(script: string): Promise<string> {
+    return this.evaluateWithTimeout(script, REQUEST_TIMEOUT_MS);
+  }
+
+  private async evaluateWithTimeout(script: string, timeout: number): Promise<string> {
     const params: Record<string, unknown> = {
       expression: script,
       returnByValue: true,
     };
     if (this.executionContextId !== null) params.contextId = this.executionContextId;
 
-    const result = await this.request<{
+    const result = await this.requestWithTimeout<{
       result: { value?: unknown; description?: string };
       exceptionDetails?: { text: string; exception?: { description?: string } };
-    }>("Runtime.evaluate", params);
+    }>("Runtime.evaluate", params, timeout);
 
     if (result.exceptionDetails) {
       throw new Error(
@@ -351,10 +360,12 @@ export class CDPBridge {
             : (renderer.getFiberRoots ? renderer.getFiberRoots() : new Set());
           roots.forEach(function(root) {
             function walk(fiber, depth) {
-              if (!fiber || depth > 50) return;
+              if (!fiber || depth > 30 || nodeId > 500) return;
               var name = null;
-              if (typeof fiber.type === 'string') name = fiber.type;
-              else if (fiber.type) name = fiber.type.displayName || fiber.type.name || null;
+              if (typeof fiber.type === 'function' || typeof fiber.type === 'object') {
+                // Only show named React components, skip host nodes (View, Text, etc.)
+                name = (fiber.type && (fiber.type.displayName || fiber.type.name)) || null;
+              }
               if (name) lines.push('  '.repeat(depth) + '[' + (nodeId++) + '] ' + name);
               if (fiber.child) walk(fiber.child, depth + (name ? 1 : 0));
               if (fiber.sibling) walk(fiber.sibling, depth);
@@ -365,7 +376,7 @@ export class CDPBridge {
         return lines.length > 0 ? lines.join('\n') : '(empty tree)';
       } catch(e) { return 'Error walking fiber tree: ' + String(e); }
     })()`;
-    return this.evaluate(script);
+    return this.evaluateWithTimeout(script, TREE_TIMEOUT_MS);
   }
 
   // ── 2.3 inspect ───────────────────────────────────────────────────────────

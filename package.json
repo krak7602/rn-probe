@@ -1,6 +1,6 @@
 {
   "name": "@rn-probe/cli",
-  "version": "0.2.7",
+  "version": "0.2.8",
   "description": "CLI + daemon tool for Claude Code to introspect live React Native apps",
   "type": "module",
   "bin": {

@@ -30,7 +30,7 @@ export function isError(r: AnyResponse): r is ErrorResponse {
 
 // ── IPC client ────────────────────────────────────────────────────────────────
 
-const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_TIMEOUT_MS = 30_000; // must be > TREE_TIMEOUT_MS (25s) in cdp.ts
 
 /**
  * Send a single request to the daemon and return the result.
