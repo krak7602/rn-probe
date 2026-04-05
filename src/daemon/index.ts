@@ -35,22 +35,25 @@ register("open", async (params) => {
 
   const forceNewArch = params.forceNewArch === true;
 
-  // Auto-detect: probe /json; if targets found use CDP, else fall back to legacy port 8097
+  // Always connect port 8097 for component tree (works on both old and new arch)
+  await devtools.connect();
+
+  // Additionally try CDP for eval, errors, logs, network (new arch only)
   cdp = new CDPBridge(state.metroUrl);
   const cdpConnected = await cdp.connect(forceNewArch);
 
   if (cdpConnected) {
     state.arch = "new";
-    state.devtoolsConnected = true;
     devtools.useCDP(cdp);
   } else {
     cdp = null;
     state.arch = "legacy";
-    await devtools.connect();
   }
 
+  state.devtoolsConnected = true;
+
   const archMsg = state.arch === "new"
-    ? "Connected via CDP (new architecture)"
+    ? "Connected via CDP (new architecture) + DevTools (port 8097)"
     : "Connected via DevTools (legacy architecture)";
 
   return {
@@ -75,7 +78,10 @@ register("close", async () => {
 
 register("bundle-status", async () => metro.getBundleStatus());
 register("errors", async () => metro.getErrors(devtools.getErrors()));
-register("logs", async (p) => metro.getLogs(Number(p.lines ?? 50)));
+register("logs", async (p) => {
+  const lines = Number(p.lines ?? 50);
+  return cdp?.isConnected ? cdp.getLogs(lines) : metro.getLogs(lines);
+});
 register("reload", async () => metro.reload());
 register("restart-metro", async () => metro.restart());
 

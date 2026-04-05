@@ -8,6 +8,7 @@ const RECONNECT_DELAY_MS = 1_000;
 const TARGET_WAIT_MS = 10_000;
 const TARGET_POLL_INTERVAL_MS = 500;
 const ERROR_BUFFER_SIZE = 50;
+const LOG_BUFFER_SIZE = 500;
 
 // ── CDP protocol types ────────────────────────────────────────────────────────
 
@@ -80,6 +81,7 @@ export class CDPBridge {
   }>();
   private errorBuffer: RuntimeException[] = [];
   private networkLog: Map<string, NetworkRequest> = new Map();
+  private consoleLog: string[] = [];
 
   constructor(metroUrl: string) {
     this.metroUrl = metroUrl;
@@ -157,6 +159,7 @@ export class CDPBridge {
         this.connected = true;
         this.send("Runtime.enable", {});
         this.send("Network.enable", {});
+        this.send("Console.enable", {});
         resolve();
       });
 
@@ -236,6 +239,20 @@ export class CDPBridge {
         pending.resolve(msg.result);
       }
       return;
+    }
+
+    // Console log events
+    if (msg.method === "Runtime.consoleAPICalled" && msg.params) {
+      const p = msg.params as {
+        type: string;
+        args: Array<{ type: string; value?: unknown; description?: string }>;
+      };
+      const text = p.args
+        .map((a) => (a.value !== undefined ? String(a.value) : (a.description ?? "")))
+        .join(" ");
+      const line = `[${p.type}] ${text}`;
+      if (this.consoleLog.length >= LOG_BUFFER_SIZE) this.consoleLog.shift();
+      this.consoleLog.push(line);
     }
 
     // 2.5 Error events
@@ -402,6 +419,13 @@ export class CDPBridge {
         return stack ? `${msg}\n${stack}` : msg;
       })
       .join("\n\n");
+  }
+
+  // ── getLogs ───────────────────────────────────────────────────────────────────
+
+  getLogs(lines: number): string {
+    const tail = this.consoleLog.slice(-lines);
+    return tail.length > 0 ? tail.join("\n") : "(no console output captured yet)";
   }
 
   // ── 2.6 getNetwork ────────────────────────────────────────────────────────

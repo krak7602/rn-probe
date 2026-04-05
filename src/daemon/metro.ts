@@ -56,13 +56,17 @@ export class MetroBridge {
       throw new Error(`Metro not reachable at ${this.baseUrl}. Is your dev server running?`);
     }
 
-    const parsed = JSON.parse(data) as MetroStatus;
     const parts: string[] = [];
-
     if (cdpErrors) parts.push(cdpErrors);
 
-    if (parsed.type === "BundleTransformError") {
-      parts.push(`Build Error:\n${JSON.stringify(parsed, null, 2)}`);
+    // Metro /status may return plain text ("packager-status:running") or JSON
+    try {
+      const parsed = JSON.parse(data) as MetroStatus;
+      if (parsed.type === "BundleTransformError") {
+        parts.push(`Build Error:\n${JSON.stringify(parsed, null, 2)}`);
+      }
+    } catch {
+      // Plain-text status — not a build error
     }
 
     return parts.length > 0 ? parts.join("\n\n") : "No errors.";
