@@ -1,13 +1,17 @@
 #!/usr/bin/env node
 import { Command } from "commander";
+import { createRequire } from "node:module";
 import { sendRequest, removeStaleSocket } from "./ipc.js";
 import { ensureDaemon } from "./spawn.js";
+
+const require = createRequire(import.meta.url);
+const { version } = require("../package.json") as { version: string };
 
 const program = new Command();
 program
   .name("rn")
   .description("rn-probe — Claude Code's window into a live React Native app")
-  .version("0.1.0")
+  .version(version)
   .option("--target <udid>", "Override active simulator/device UDID")
   .option("--json", "Output raw JSON instead of human-readable text");
 
