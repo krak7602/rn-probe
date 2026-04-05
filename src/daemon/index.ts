@@ -5,6 +5,7 @@ import { state } from "./state.js";
 import { MetroBridge } from "./metro.js";
 import { DevToolsBridge } from "./devtools.js";
 import { SimulatorBridge } from "./simulator.js";
+import { CDPBridge } from "./cdp.js";
 
 // ── Handler registry ──────────────────────────────────────────────────────────
 
@@ -20,6 +21,7 @@ function register(method: string, fn: Handler) {
 export const metro = new MetroBridge();
 export const devtools = new DevToolsBridge();
 export const simulator = new SimulatorBridge();
+let cdp: CDPBridge | null = null;
 
 // ── Lifecycle handlers ────────────────────────────────────────────────────────
 
@@ -30,14 +32,35 @@ register("open", async (params) => {
   if (params.targetUdid) state.targetUdid = params.targetUdid as string;
 
   metro.connect(state.metroUrl);
-  await devtools.connect();
+
+  const forceNewArch = params.forceNewArch === true;
+
+  // Auto-detect: probe /json; if targets found use CDP, else fall back to legacy port 8097
+  cdp = new CDPBridge(state.metroUrl);
+  const cdpConnected = await cdp.connect(forceNewArch);
+
+  if (cdpConnected) {
+    state.arch = "new";
+    state.devtoolsConnected = true;
+    devtools.useCDP(cdp);
+  } else {
+    cdp = null;
+    state.arch = "legacy";
+    await devtools.connect();
+  }
+
+  const archMsg = state.arch === "new"
+    ? "Connected via CDP (new architecture)"
+    : "Connected via DevTools (legacy architecture)";
 
   return {
     metroUrl: state.metroUrl,
     expoMode: state.expoMode,
     platform: state.platform,
+    arch: state.arch,
     metroConnected: state.metroConnected,
     devtoolsConnected: state.devtoolsConnected,
+    message: archMsg,
   };
 });
 
@@ -51,7 +74,7 @@ register("close", async () => {
 // ── Metro handlers ────────────────────────────────────────────────────────────
 
 register("bundle-status", async () => metro.getBundleStatus());
-register("errors", async () => metro.getErrors());
+register("errors", async () => metro.getErrors(devtools.getErrors()));
 register("logs", async (p) => metro.getLogs(Number(p.lines ?? 50)));
 register("reload", async () => metro.reload());
 register("restart-metro", async () => metro.restart());

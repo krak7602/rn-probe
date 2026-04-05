@@ -50,20 +50,22 @@ export class MetroBridge {
 
   // ── Errors ──────────────────────────────────────────────────────────────────
 
-  async getErrors(): Promise<string> {
-    // Metro surfaces errors via /status (type=BundleTransformError) or cached error events.
-    // We check /status first, then fall back to the stored DevTools error list.
+  async getErrors(cdpErrors = ""): Promise<string> {
     const data = await this.get("/status").catch(() => null);
     if (data === null) {
       throw new Error(`Metro not reachable at ${this.baseUrl}. Is your dev server running?`);
     }
 
     const parsed = JSON.parse(data) as MetroStatus;
+    const parts: string[] = [];
+
+    if (cdpErrors) parts.push(cdpErrors);
+
     if (parsed.type === "BundleTransformError") {
-      return `Build Error:\n${JSON.stringify(parsed, null, 2)}`;
+      parts.push(`Build Error:\n${JSON.stringify(parsed, null, 2)}`);
     }
 
-    return "No errors.";
+    return parts.length > 0 ? parts.join("\n\n") : "No errors.";
   }
 
   // ── Logs ────────────────────────────────────────────────────────────────────

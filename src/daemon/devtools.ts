@@ -1,5 +1,6 @@
 import WebSocket from "ws";
 import { state } from "./state.js";
+import type { CDPBridge } from "./cdp.js";
 
 const DEVTOOLS_PORT = 8097;
 const RECONNECT_DELAY_MS = 2000;
@@ -40,12 +41,19 @@ interface NetworkRequest {
 // ── DevToolsBridge ────────────────────────────────────────────────────────────
 
 export class DevToolsBridge {
+  private cdpBridge: CDPBridge | null = null;
   private ws: WebSocket | null = null;
   private connected = false;
   private pendingRequests = new Map<string, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
   private componentTree: Map<number, ComponentNode> = new Map();
   private networkLog: NetworkRequest[] = [];
   private perfEvents: Array<{ ts: number; jsFps: number; uiFps: number }> = [];
+  private legacyErrorCache: string[] = [];
+
+  // 4.1 — attach CDP bridge; disables legacy WS path
+  useCDP(bridge: CDPBridge) {
+    this.cdpBridge = bridge;
+  }
 
   async connect(): Promise<void> {
     return new Promise((resolve) => {
@@ -155,20 +163,19 @@ export class DevToolsBridge {
     });
   }
 
-  // ── Tree ─────────────────────────────────────────────────────────────────────
+  // ── Tree (4.2) ───────────────────────────────────────────────────────────────
 
   async getTree(): Promise<string> {
-    // Request a fresh snapshot
+    if (this.cdpBridge?.isConnected) return this.cdpBridge.getTree();
+    if (!this.connected) {
+      throw new Error("RN DevTools not connected. Run 'rn open' first, or ensure your app is running in dev mode.");
+    }
+    // Legacy path
     const snapshot = await this.request<{ nodes: ComponentNode[] }>("getComponentTree", { rendererID: 1 });
     const nodes = new Map<number, ComponentNode>();
     for (const n of snapshot.nodes) nodes.set(n.id, n);
-
-    const roots = snapshot.nodes.filter((n) => {
-      // Root nodes are not referenced as a child by any other node
-      const allChildIds = new Set(snapshot.nodes.flatMap((x) => x.children));
-      return !allChildIds.has(n.id);
-    });
-
+    const allChildIds = new Set(snapshot.nodes.flatMap((x) => x.children));
+    const roots = snapshot.nodes.filter((n) => !allChildIds.has(n.id));
     const lines: string[] = [];
     const walk = (id: number, depth: number) => {
       const node = nodes.get(id);
@@ -176,86 +183,81 @@ export class DevToolsBridge {
       lines.push(`${"  ".repeat(depth)}[${id}] ${node.displayName ?? "(anonymous)"}`);
       for (const childId of node.children) walk(childId, depth + 1);
     };
-
     for (const root of roots) walk(root.id, 0);
     return lines.join("\n") || "(empty tree)";
   }
 
-  // ── Inspect ──────────────────────────────────────────────────────────────────
+  // ── Inspect (4.3) ────────────────────────────────────────────────────────────
 
   async inspect(id: string): Promise<string> {
+    if (this.cdpBridge?.isConnected) {
+      const result = await this.cdpBridge.inspect(id);
+      return result ?? `Component ${id} not found.`;
+    }
+    if (!this.connected) throw new Error("RN DevTools not connected.");
+    // Legacy path
     const result = await this.request<{ id: number; value: ComponentNode } | null>(
       "inspectElement",
       { id: Number(id), rendererID: 1, path: null }
     );
-
     if (!result) return `Component ${id} not found.`;
-
     const el = result.value;
     const lines: string[] = [];
     lines.push(`Component:  ${el.displayName ?? "(anonymous)"}`);
     if (el.source) lines.push(`Source:     ${el.source.fileName}:${el.source.lineNumber}`);
-
     if (el.props && Object.keys(el.props).length > 0) {
       lines.push("Props:");
-      for (const [k, v] of Object.entries(el.props)) {
-        lines.push(`  ${k}: ${JSON.stringify(v)}`);
-      }
+      for (const [k, v] of Object.entries(el.props)) lines.push(`  ${k}: ${JSON.stringify(v)}`);
     }
-
     if (el.state !== null && el.state !== undefined) {
       lines.push(`State:      ${JSON.stringify(el.state, null, 2)}`);
     }
-
     if (el.hooks && (el.hooks as unknown[]).length > 0) {
       lines.push("Hooks:");
       for (const h of el.hooks as Array<{ name: string; value: unknown }>) {
         lines.push(`  ${h.name}: ${JSON.stringify(h.value)}`);
       }
     }
-
     return lines.join("\n");
   }
 
-  // ── Find ─────────────────────────────────────────────────────────────────────
+  // ── Find (4.4) ───────────────────────────────────────────────────────────────
 
   async find(name: string): Promise<string> {
+    if (this.cdpBridge?.isConnected) return this.cdpBridge.find(name);
+    if (!this.connected) throw new Error("RN DevTools not connected.");
+    // Legacy path
     const snapshot = await this.request<{ nodes: ComponentNode[] }>("getComponentTree", { rendererID: 1 });
     const lower = name.toLowerCase();
-    const matches = snapshot.nodes.filter((n) =>
-      (n.displayName ?? "").toLowerCase().includes(lower)
-    );
-
+    const matches = snapshot.nodes.filter((n) => (n.displayName ?? "").toLowerCase().includes(lower));
     if (matches.length === 0) return `No components matching "${name}" found.`;
-
-    return matches
-      .map((n) => `[${n.id}] ${n.displayName ?? "(anonymous)"}`)
-      .join("\n");
+    return matches.map((n) => `[${n.id}] ${n.displayName ?? "(anonymous)"}`).join("\n");
   }
 
-  // ── Eval ─────────────────────────────────────────────────────────────────────
+  // ── Eval (4.5) ───────────────────────────────────────────────────────────────
 
   async evaluate(script: string): Promise<string> {
-    // Use CDP evaluateOnCallFrame via DevTools bridge
+    if (this.cdpBridge?.isConnected) return this.cdpBridge.evaluate(script);
+    if (!this.connected) throw new Error("RN DevTools not connected.");
+    // Legacy path
     const result = await this.request<{ result: unknown; exceptionDetails?: { text: string; exception?: { description: string } } }>(
       "evaluateOnCallFrame",
       { expression: script, callFrameId: "0" }
     );
-
     if (result.exceptionDetails) {
       throw new Error(result.exceptionDetails.exception?.description ?? result.exceptionDetails.text);
     }
-
     return JSON.stringify(result.result, null, 2);
   }
 
-  // ── Network ──────────────────────────────────────────────────────────────────
+  // ── Network (4.6) ────────────────────────────────────────────────────────────
 
   network(idx?: number): string {
+    if (this.cdpBridge?.isConnected) return this.cdpBridge.getNetwork(idx);
+    // Legacy path
     if (this.networkLog.length === 0) {
       return "No network requests captured.\nNote: Network inspection requires Hermes with network inspection enabled.";
     }
-
     if (idx !== undefined) {
       const req = this.networkLog[idx];
       if (!req) return `No request at index ${idx}.`;
@@ -276,10 +278,16 @@ export class DevToolsBridge {
       if (req.responseBody) lines.push(`Response Body:\n${req.responseBody}`);
       return lines.join("\n");
     }
-
     return this.networkLog
       .map((r, i) => `[${i}] ${r.method} ${r.url} — ${r.status ?? "pending"} (${r.duration !== undefined ? `${r.duration}ms` : "—"})`)
       .join("\n");
+  }
+
+  // ── Errors (4.7) ─────────────────────────────────────────────────────────────
+
+  getErrors(): string {
+    if (this.cdpBridge?.isConnected) return this.cdpBridge.getErrors();
+    return this.legacyErrorCache.join("\n\n");
   }
 
   // ── Perf ─────────────────────────────────────────────────────────────────────

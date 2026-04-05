@@ -32,11 +32,12 @@ program
   .description("Connect to Metro + RN DevTools, optionally boot simulator")
   .option("--expo-go", "Use exp:// deep-link scheme (Expo Go)")
   .option("--dev-build", "Use custom app scheme (Expo dev build)")
+  .option("--new-arch", "Force CDP mode (RN new architecture)")
   .option("--force", "Kill existing daemon and restart")
-  .action(async (metroUrl: string | undefined, opts: { expoGo?: boolean; devBuild?: boolean; force?: boolean }) => {
+  .action(async (metroUrl: string | undefined, opts: { expoGo?: boolean; devBuild?: boolean; newArch?: boolean; force?: boolean }) => {
     if (opts.force) removeStaleSocket();
     const expoMode = opts.expoGo ? "expo-go" : opts.devBuild ? "dev-build" : "bare";
-    await dispatch("open", { metroUrl, expoMode });
+    await dispatch("open", { metroUrl, expoMode, forceNewArch: opts.newArch ?? false });
   });
 
 program
